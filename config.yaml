@@ -1,0 +1,42 @@
+# 论文推送配置文件
+# 修改这里的关键词来定制你感兴趣的领域
+
+arxiv:
+  # arXiv 搜索关键词列表（支持 AND / OR 逻辑）
+  # 参考 arXiv 分类: https://arxiv.org/category_taxonomy
+  queries:
+    - "large language models"
+    - "multimodal learning"
+    - "diffusion models"
+    - "reinforcement learning from human feedback"
+    - "autonomous agents"
+  
+  # arXiv 分类过滤（留空则不过滤）
+  # 常用分类: cs.AI, cs.LG, cs.CV, cs.CL, cs.RO, stat.ML
+  categories:
+    - "cs.AI"
+    - "cs.LG"
+    - "cs.CV"
+    - "cs.CL"
+
+  # 每个关键词最多获取的论文数量
+  max_results_per_query: 5
+
+  # 论文发布时间范围（天），只看最近 N 天的论文
+  days_back: 1
+
+deepseek:
+  # DeepSeek 模型选择
+  model: "deepseek-chat"
+  # 概述的最大 token 数
+  max_summary_tokens: 500
+  # 概述语言：zh（中文）或 en（英文）
+  summary_language: "zh"
+
+github:
+  # GitHub Issue 的标签（会自动创建）
+  issue_labels:
+    - "daily-papers"
+    - "auto-generated"
+  # Issue 标题前缀
+  issue_title_prefix: "📄 每日论文推送"
