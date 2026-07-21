@@ -28,16 +28,17 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
-ARXIV_API = "https://export.arxiv.org/api/query"
+# 改用 Semantic Scholar API：国内可直连，完整收录 arXiv 论文，免费无需 Key
+S2_SEARCH_API = "https://api.semanticscholar.org/graph/v1/paper/search"
+S2_FIELDS = "title,abstract,authors,year,publicationDate,externalIds,openAccessPdf,fieldsOfStudy,isOpenAccess"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-ARXIV_NS = "http://www.w3.org/2005/Atom"
 
-# arXiv 要求请求带上有意义的 User-Agent，否则容易被限流 (429)
 HTTP_HEADERS = {
     "User-Agent": "Auto-Paper-Agent/1.0 (https://github.com/Udian-Semir/Auto_Paper; research digest bot)"
 }
-# 遇到 429 时的最大重试次数
+# 遇到限流时的最大重试次数
 MAX_RETRIES = 5
+
 
 
 
