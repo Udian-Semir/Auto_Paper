@@ -12,8 +12,8 @@ import time
 import logging
 import datetime
 import requests
-import xml.etree.ElementTree as ET
 from typing import Optional
+
 from pathlib import Path
 
 import yaml
@@ -48,43 +48,47 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-# ── arXiv 抓取 ────────────────────────────────────────────────────────────────
-def build_arxiv_query(query: str, categories: list[str]) -> str:
-    """构建 arXiv 搜索查询字符串"""
-    q = f'all:"{query}"'
-    if categories:
-        cat_filter = " OR ".join(f"cat:{c}" for c in categories)
-        q = f"({q}) AND ({cat_filter})"
-    return q
+# ── 论文抓取（Semantic Scholar） ──────────────────────────────────────────────
+def _parse_date(paper: dict) -> Optional[datetime.date]:
+    """从 S2 返回中解析发布日期"""
+    date_str = paper.get("publicationDate")
+    if date_str:
+        try:
+            return datetime.date.fromisoformat(date_str)
+        except ValueError:
+            pass
+    # 退化：只有年份时按当年 1 月 1 日算
+    year = paper.get("year")
+    if year:
+        return datetime.date(int(year), 1, 1)
+    return None
 
 
-def fetch_arxiv_papers(
+def fetch_papers(
     query: str,
     categories: list[str],
     max_results: int,
     days_back: int,
 ) -> list[dict]:
-    """从 arXiv API 获取最近的论文"""
-    search_query = build_arxiv_query(query, categories)
+    """从 Semantic Scholar API 搜索最近的论文（国内可直连）"""
     params = {
-        "search_query": search_query,
-        "start": 0,
-        "max_results": max_results * 2,  # 多取一些，后面再过滤时间
-        "sortBy": "submittedDate",
-        "sortOrder": "descending",
+        "query": query,
+        "limit": min(max_results * 5, 100),  # 多取一些，后面按时间过滤
+        "fields": S2_FIELDS,
+        "sort": "publicationDate:desc",
     }
 
-    # 带 User-Agent 和指数退避重试，缓解 429 限流
+    # 指数退避重试（S2 免费额度偶尔限流 429）
     resp = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.get(
-                ARXIV_API, params=params, headers=HTTP_HEADERS, timeout=30
+                S2_SEARCH_API, params=params, headers=HTTP_HEADERS, timeout=30
             )
             if resp.status_code == 429:
-                wait = min(60, 5 * attempt)  # 5s, 10s, 15s...
+                wait = min(60, 5 * attempt)
                 log.warning(
-                    f"arXiv 返回 429 限流，{wait}s 后重试 ({attempt}/{MAX_RETRIES})..."
+                    f"Semantic Scholar 返回 429 限流，{wait}s 后重试 ({attempt}/{MAX_RETRIES})..."
                 )
                 time.sleep(wait)
                 continue
@@ -92,7 +96,7 @@ def fetch_arxiv_papers(
             break
         except requests.RequestException as e:
             wait = min(60, 5 * attempt)
-            log.warning(f"arXiv 请求异常: {e}，{wait}s 后重试 ({attempt}/{MAX_RETRIES})...")
+            log.warning(f"S2 请求异常: {e}，{wait}s 后重试 ({attempt}/{MAX_RETRIES})...")
             time.sleep(wait)
     else:
         log.error(f"关键词 '{query}' 多次重试后仍失败，跳过。")
@@ -102,53 +106,45 @@ def fetch_arxiv_papers(
         log.error(f"关键词 '{query}' 请求失败，跳过。")
         return []
 
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
-        days=days_back
-    )
+    data = resp.json().get("data", []) or []
+    cutoff = datetime.date.today() - datetime.timedelta(days=days_back)
 
     papers = []
-    root = ET.fromstring(resp.text)
-
-    for entry in root.findall(f"{{{ARXIV_NS}}}entry"):
-        # 解析发布时间
-        published_text = entry.findtext(f"{{{ARXIV_NS}}}published", "")
-        try:
-            published = datetime.datetime.fromisoformat(
-                published_text.replace("Z", "+00:00")
-            )
-        except ValueError:
+    for item in data:
+        pub_date = _parse_date(item)
+        if pub_date is None or pub_date < cutoff:
             continue
 
-        if published < cutoff:
-            continue
+        abstract = (item.get("abstract") or "").strip().replace("\n", " ")
+        if not abstract:
+            continue  # 没摘要的没法概述，跳过
 
-        # 解析基础字段
-        paper_id_raw = entry.findtext(f"{{{ARXIV_NS}}}id", "")
-        paper_id = paper_id_raw.split("/abs/")[-1] if "/abs/" in paper_id_raw else paper_id_raw
-        title = entry.findtext(f"{{{ARXIV_NS}}}title", "").strip().replace("\n", " ")
-        abstract = entry.findtext(f"{{{ARXIV_NS}}}summary", "").strip().replace("\n", " ")
+        # arXiv ID（如果有），用于生成 arXiv 链接
+        ext = item.get("externalIds") or {}
+        arxiv_id = ext.get("ArXiv")
+        s2_id = item.get("paperId", "")
+        paper_id = arxiv_id or s2_id
 
-        # 作者
-        authors = [
-            a.findtext(f"{{{ARXIV_NS}}}name", "")
-            for a in entry.findall(f"{{{ARXIV_NS}}}author")
-        ]
+        if arxiv_id:
+            url = f"https://arxiv.org/abs/{arxiv_id}"
+            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+        else:
+            url = f"https://www.semanticscholar.org/paper/{s2_id}"
+            oa = item.get("openAccessPdf") or {}
+            pdf_url = oa.get("url", url)
 
-        # 分类标签
-        tags = [
-            tag.get("term", "")
-            for tag in entry.findall(f"{{{ARXIV_NS}}}category")
-        ]
+        authors = [a.get("name", "") for a in (item.get("authors") or [])][:5]
+        tags = item.get("fieldsOfStudy") or []
 
         papers.append(
             {
                 "id": paper_id,
-                "title": title,
+                "title": (item.get("title") or "").strip().replace("\n", " "),
                 "abstract": abstract,
-                "authors": authors[:5],  # 只保留前 5 位作者
-                "published": published.strftime("%Y-%m-%d"),
-                "url": f"https://arxiv.org/abs/{paper_id}",
-                "pdf_url": f"https://arxiv.org/pdf/{paper_id}",
+                "authors": authors,
+                "published": pub_date.strftime("%Y-%m-%d"),
+                "url": url,
+                "pdf_url": pdf_url,
                 "tags": tags,
                 "query": query,
             }
@@ -159,6 +155,7 @@ def fetch_arxiv_papers(
 
     log.info(f"关键词 '{query}' 获取到 {len(papers)} 篇论文")
     return papers
+
 
 
 def deduplicate_papers(papers: list[dict]) -> list[dict]:
@@ -342,11 +339,11 @@ def main():
 
     log.info(f"运行模式: {run_mode}")
 
-    # ── Step 1: 从 arXiv 抓取论文 ──
-    log.info("开始从 arXiv 抓取论文...")
+    # ── Step 1: 从 Semantic Scholar 抓取论文 ──
+    log.info("开始从 Semantic Scholar 抓取论文...")
     all_papers = []
     for query in arxiv_cfg["queries"]:
-        papers = fetch_arxiv_papers(
+        papers = fetch_papers(
             query=query,
             categories=arxiv_cfg.get("categories", []),
             max_results=arxiv_cfg.get("max_results_per_query", 5),
@@ -354,6 +351,7 @@ def main():
         )
         all_papers.extend(papers)
         time.sleep(3)  # 礼貌性延迟，避免 API 限流
+
 
     all_papers = deduplicate_papers(all_papers)
     log.info(f"共获取 {len(all_papers)} 篇唯一论文")
