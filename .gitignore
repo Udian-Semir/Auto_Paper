@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# 本地生成的报告和数据（可选择提交）
+# reports/
+# data/
+
+# macOS
+.DS_Store
+
+# VSCode
+.vscode/settings.json

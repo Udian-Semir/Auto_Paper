@@ -1,0 +1,65 @@
+name: 📄 每日论文推送
+
+on:
+  # 每天北京时间 09:00 触发 (UTC 01:00)
+  schedule:
+    - cron: "0 1 * * *"
+
+  # 允许手动触发（方便测试）
+  workflow_dispatch:
+    inputs:
+      days_back:
+        description: "抓取最近几天的论文（默认 1）"
+        required: false
+        default: "1"
+
+jobs:
+  fetch-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write  # 允许创建 Issue
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 🔧 Override days_back if manually triggered
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          python - <<'EOF'
+          import yaml, sys
+          with open("config.yaml", "r") as f:
+              cfg = yaml.safe_load(f)
+          cfg["arxiv"]["days_back"] = int("${{ github.event.inputs.days_back }}")
+          with open("config.yaml", "w") as f:
+              yaml.dump(cfg, f, allow_unicode=True)
+          print(f"days_back 已更新为: {cfg['arxiv']['days_back']}")
+          EOF
+
+      - name: 🚀 Run paper agent
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RUN_MODE: github
+        run: python paper_agent.py
+
+      - name: 📊 Upload data artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-data-${{ github.run_id }}
+          path: |
+            data/
+            reports/
+          retention-days: 30
+          if-no-files-found: ignore
