@@ -1,142 +1,141 @@
 # 📄 Auto Paper Agent
 
-每天自动从 arXiv 抓取你感兴趣的论文，用 DeepSeek 生成中文概述，并推送到 GitHub Issues。
+> 每天晚上 9 点自动从 arXiv 抓取最新论文，用 DeepSeek AI 生成中文概述，并推送到 GitHub Issues。
 
-![GitHub Actions](https://github.com/Udian-Semir/Auto_Paper/actions/workflows/daily_paper.yml/badge.svg)
+[![每日论文推送](https://github.com/Udian-Semir/Auto_Paper/actions/workflows/daily_paper.yml/badge.svg)](https://github.com/Udian-Semir/Auto_Paper/actions/workflows/daily_paper.yml)
 
 ---
 
-## ✨ 功能
+## ✨ 功能特性
 
-- 🔍 **按关键词 + 分类** 每日从 arXiv 抓取最新论文
-- 🤖 **DeepSeek AI 概述** 自动生成中文摘要（核心问题 / 方法 / 结论）
-- 📬 **GitHub Issues 推送** 每天自动在仓库创建一条 Issue，方便浏览和订阅
-- 💾 **本地模式** 也可在 VSCode 本地运行，生成 Markdown 报告
-- ⚙️ **完全可配置** 修改 `config.yaml` 即可定制关键词和领域
+- 🕘 **每晚 9 点自动推送**：GitHub Actions 定时触发，无需手动操作
+- 📡 **三级数据源兜底**：arXiv RSS → arXiv API → Semantic Scholar，确保每天都能抓到论文
+- 🤖 **AI 中文概述**：调用 DeepSeek 对每篇论文生成核心问题 / 方法 / 结论的中文摘要
+- 📌 **GitHub Issue 推送**：每天新建一个 Issue，方便订阅通知和历史查阅
+- 🗂️ **本地运行支持**：也可以在 VSCode 本地运行，生成 Markdown 报告
 
-## 效果预览
+---
 
-每天会自动创建类似这样的 Issue：
+## 🔍 当前订阅领域
 
-> **📄 每日论文推送 [2026-07-21]**
->
-> 今日共推送 **12** 篇论文
->
-> ### 🔍 关键词：`large language models`
-> #### 1. Paper Title Here
-> - **作者**：Author A, Author B 等
-> - **链接**：[arXiv](#) | [PDF](#)
->
-> **📝 AI 概述：**
-> 1. **核心问题**：...
-> 2. **主要方法**：...
-> 3. **关键结论**：...
-> 4. **一句话总结**：...
+| 关键词 | 领域说明 |
+|---|---|
+| `large language model decision making` | 大模型决策 |
+| `LLM agent decision` | 大模型智能体决策 |
+| `decision making` | 传统决策规划 |
+| `SLAM` | 同步定位与建图 |
+| `visual pose estimation` | 视觉位姿估计 |
+| `camera pose estimation` | 相机位姿估计 |
+| `optimization algorithm` | 优化算法 |
+| `vision language action` | 视觉-语言-动作模型（VLA） |
+| `reinforcement learning` | 强化学习（RL） |
+| `world model` | 世界模型 |
+
+覆盖 arXiv 分类：`cs.AI` · `cs.LG` · `cs.CV` · `cs.CL` · `cs.RO` · `math.OC`
+
+## 🎯 RoboMaster 应用关联分析
+
+除了标准的论文概述，本 Agent 还会自动分析每篇论文与 **RoboMaster 机器人竞赛**的关联性：
+
+- **自瞄（auto-aim）场景**：装甲板检测、目标位姿估计、运动预测、云台弹道控制
+- **雷达站/哨兵决策场景**：全场态势感知、多目标跟踪、威胁评估、自主决策调度
+- **落地难点**：嵌入式/实时约束下的技术挑战
+
+可在 `config.yaml` 中设置 `enable_application_analysis: true/false` 来开启/关闭此功能，也可以修改 `application_context` 来定制你自己的应用场景。
+
 
 ---
 
 ## 🚀 快速开始
 
-### 方式一：GitHub Actions（推荐，全自动）
+### 方式一：GitHub Actions（推荐，自动运行）
 
-**第一步：Fork 或 Clone 本仓库**
+#### 1. Fork 本仓库
 
-**第二步：添加 Secret**
+点击右上角 **Fork** → 在你自己的账号下创建一个副本。
 
-进入仓库 → **Settings → Secrets and variables → Actions → New repository secret**，添加：
+#### 2. 申请 DeepSeek API Key
 
-| Secret 名称 | 值 | 说明 |
-|---|---|---|
-| `DEEPSEEK_API_KEY` | `sk-xxxxxxxx` | [DeepSeek 控制台](https://platform.deepseek.com/api_keys) 获取 |
+前往 [DeepSeek 开放平台](https://platform.deepseek.com/) 注册并获取 API Key。
 
-> `GITHUB_TOKEN` 已由 GitHub Actions 自动提供，无需手动添加。
+#### 3. 配置 GitHub Secrets
 
-**第三步：确认 Actions 权限**
+在你 Fork 的仓库中：**Settings → Secrets and variables → Actions → New repository secret**
 
-进入仓库 → **Settings → Actions → General → Workflow permissions**，选择 **Read and write permissions**。
+| Secret 名称 | 说明 |
+|---|---|
+| `DEEPSEEK_API_KEY` | 你的 DeepSeek API Key |
 
-**第四步：自定义关键词**
+#### 4. 开启写权限
 
-编辑 `config.yaml`，修改你感兴趣的研究方向：
+**Settings → Actions → General → Workflow permissions → 选 "Read and write permissions" → Save**
 
-```yaml
-arxiv:
-  queries:
-    - "large language models"
-    - "your research topic"
-  categories:
-    - "cs.AI"
-    - "cs.LG"
-```
+这一步是允许 Actions 自动创建 Issue。
 
-**第五步：手动触发测试**
+#### 5. 手动触发测试
 
-进入仓库 → **Actions → 📄 每日论文推送 → Run workflow**，验证是否正常运行。
+**Actions → 📄 每日论文推送 → Run workflow**
 
-之后每天北京时间 **09:00** 自动运行，新 Issue 会出现在仓库的 Issues 列表中。
+之后每天晚上 9 点（北京时间）会自动运行并在 Issues 里创建当天的论文推送。
 
 ---
 
 ### 方式二：本地运行（VSCode）
 
+#### 安装依赖
+
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/Udian-Semir/Auto_Paper.git
-cd Auto_Paper
-
-# 2. 安装依赖
 pip install -r requirements.txt
+```
 
-# 3. 设置环境变量（可选，没有则使用原始摘要）
-export DEEPSEEK_API_KEY="sk-your-key-here"
+#### 配置环境变量
 
-# 4. 运行（本地模式默认保存 Markdown 到 reports/ 目录）
+```bash
+export DEEPSEEK_API_KEY="your_api_key_here"
+```
+
+或在项目根目录创建 `.env` 文件（脚本会自动读取）：
+
+```
+DEEPSEEK_API_KEY=your_api_key_here
+```
+
+#### 运行
+
+```bash
 python paper_agent.py
 ```
 
-报告会保存在 `reports/YYYY-MM-DD.md`，用 VSCode Markdown 预览即可查看。
+报告会保存在 `reports/YYYY-MM-DD.md`，数据备份在 `data/YYYY-MM-DD.json`。
 
 ---
 
 ## ⚙️ 配置说明
 
-编辑 `config.yaml` 来定制推送内容：
+编辑 `config.yaml` 来自定义感兴趣的领域：
 
 ```yaml
 arxiv:
-  queries:              # 搜索关键词列表
-    - "diffusion models"
+  queries:
+    - "large language models"     # 添加或修改关键词
+    - "SLAM"
     - "reinforcement learning"
-  categories:           # arXiv 分类过滤（空列表 = 不过滤）
+    # ...
+
+  categories:                     # arXiv 分类过滤
     - "cs.AI"
-    - "cs.LG"
-  max_results_per_query: 5   # 每个关键词最多几篇
-  days_back: 1               # 只看最近几天的论文
+    - "cs.RO"
+    # ...
+
+  max_results_per_query: 4        # 每个关键词最多几篇
 
 deepseek:
-  model: "deepseek-chat"     # 模型版本
-  summary_language: "zh"     # zh=中文, en=英文
-  max_summary_tokens: 500
-
-github:
-  issue_title_prefix: "📄 每日论文推送"
-  issue_labels:
-    - "daily-papers"
-    - "auto-generated"
+  summary_language: "zh"                 # zh=中文, en=英文
+  enable_application_analysis: true      # 是否附加 RoboMaster 应用关联分析
+  application_context: |                 # 自定义你的应用场景描述
+    我的应用场景是 RoboMaster ...
 ```
 
-### 常用 arXiv 分类
-
-| 分类 | 领域 |
-|---|---|
-| `cs.AI` | 人工智能 |
-| `cs.LG` | 机器学习 |
-| `cs.CV` | 计算机视觉 |
-| `cs.CL` | 计算语言学 / NLP |
-| `cs.RO` | 机器人 |
-| `stat.ML` | 统计机器学习 |
-| `cs.IR` | 信息检索 |
-| `cs.NE` | 神经网络 |
 
 ---
 
@@ -145,32 +144,69 @@ github:
 ```
 Auto_Paper/
 ├── paper_agent.py              # 核心脚本
-├── config.yaml                 # 配置文件（修改此处定制）
-├── requirements.txt
-├── .gitignore
+├── config.yaml                 # 关键词与配置
+├── requirements.txt            # Python 依赖
 ├── .github/
 │   └── workflows/
-│       └── daily_paper.yml     # GitHub Actions 工作流
-├── reports/                    # 本地运行生成的 Markdown 报告
-│   └── 2026-07-21.md
-└── data/                       # 论文数据 JSON 备份
-    └── 2026-07-21.json
+│       └── daily_paper.yml     # GitHub Actions 定时任务
+├── reports/                    # 本地运行的 Markdown 报告（自动生成）
+└── data/                       # JSON 数据备份（自动生成）
 ```
 
 ---
 
-## 🔧 进阶用法
+## 🔄 数据源说明
 
-**手动触发并指定天数范围：**
+脚本按优先级依次尝试以下数据源：
 
-在 GitHub Actions 手动触发时，可以输入 `days_back=7` 来一次性抓取过去 7 天的论文。
-
-**订阅通知：**
-
-在 GitHub 仓库页面，点击右上角 **Watch → Custom → Issues**，每次新 Issue 创建时你会收到邮件通知。
+1. **arXiv RSS**（首选）— CDN 分发，无限流，国内/GitHub Actions 均可访问
+2. **arXiv Atom API**（备用 1）— GitHub Actions 美国服务器可用
+3. **Semantic Scholar**（备用 2）— 国内可直连，作为最终兜底
 
 ---
 
-## 📜 License
+## 📬 Issue 示例
 
-MIT
+每日推送效果如下（在仓库 Issues 页可查看）：
+
+```
+📄 每日论文推送 [2026-07-21]
+
+## 🔍 关键词：`SLAM`
+
+### 1. Gaussian Splatting SLAM with Motion Compensation
+
+- 作者：Zhang Wei, Li Fang 等
+- 发布时间：2026-07-21
+- 分类：`cs.CV` · `cs.RO`
+- 链接：[arXiv](...) | [PDF](...)
+
+**📝 AI 概述：**
+
+**第一部分：论文概述**
+**核心问题**：...
+**主要方法**：...
+**关键结论**：...
+**一句话总结**：...
+
+**第二部分：应用关联分析**
+**与自瞄的关联**：...
+**与雷达站/哨兵决策的关联**：...
+**落地难点**：...
+```
+
+
+---
+
+## 🛠️ 可选：Semantic Scholar API Key
+
+匿名调用 Semantic Scholar 有速率限制。如需更稳定的访问，可免费申请 API Key：
+[https://www.semanticscholar.org/product/api](https://www.semanticscholar.org/product/api)
+
+申请后在 GitHub Secrets 中添加 `S2_API_KEY`。
+
+---
+
+## 📄 License
+
+MIT License

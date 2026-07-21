@@ -2,25 +2,34 @@
 # 修改这里的关键词来定制你感兴趣的领域
 
 arxiv:
-  # arXiv 搜索关键词列表（支持 AND / OR 逻辑）
-  # 参考 arXiv 分类: https://arxiv.org/category_taxonomy
+  # arXiv 搜索关键词列表（arXiv 检索英文，这里用对应领域的英文关键词）
+  # 覆盖领域：大模型 / 传统决策 / SLAM / 视觉位姿 / 优化算法 / VLA / RL / 世界模型
   queries:
-    - "large language models"
-    - "multimodal learning"
-    - "diffusion models"
-    - "reinforcement learning from human feedback"
-    - "autonomous agents"
-  
+    - "large language model decision making"  # 大模型决策
+    - "LLM agent decision"                     # 大模型智能体决策
+    - "decision making"                        # 传统决策
+
+    - "SLAM"                           # 同步定位与建图
+    - "visual pose estimation"         # 计算机视觉位姿
+    - "camera pose estimation"         # 相机位姿估计
+    - "optimization algorithm"         # 优化算法
+    - "vision language action"         # VLA
+    - "reinforcement learning"         # RL
+    - "world model"                    # 世界模型
+
   # arXiv 分类过滤（留空则不过滤）
-  # 常用分类: cs.AI, cs.LG, cs.CV, cs.CL, cs.RO, stat.ML
+  # 常用分类: cs.AI(人工智能) cs.LG(机器学习) cs.CV(计算机视觉)
+  #          cs.CL(自然语言) cs.RO(机器人) math.OC(优化) stat.ML(统计学习)
   categories:
     - "cs.AI"
     - "cs.LG"
     - "cs.CV"
     - "cs.CL"
+    - "cs.RO"
+    - "math.OC"
 
   # 每个关键词最多获取的论文数量
-  max_results_per_query: 5
+  max_results_per_query: 4
 
   # 论文发布时间范围（天），只看最近 N 天的论文
   days_back: 1
@@ -28,10 +37,67 @@ arxiv:
 deepseek:
   # DeepSeek 模型选择
   model: "deepseek-chat"
-  # 概述的最大 token 数
-  max_summary_tokens: 500
+  # 概述的最大 token 数（含应用关联分析，适当放大）
+  max_summary_tokens: 900
   # 概述语言：zh（中文）或 en（英文）
   summary_language: "zh"
+
+  # 是否在概述后附加"应用关联分析"：
+  # 分析该论文与 RoboMaster 自瞄 / 雷达站哨兵自动化决策的关系与可改进点
+  enable_application_analysis: true
+  # 应用背景描述（会作为分析上下文喂给模型，基于实际代码仓库整理，可自行修改补充）
+  application_context: |
+    我的应用场景是 RoboMaster 机器人竞赛，以下是我实际维护的代码架构，请结合它们具体分析论文技术的可迁移点：
+
+    【场景一：自瞄（Auto-Aim），仓库 ~/workspace/AutoAim，ROS2（C++），架构参考中科大 USTC 2025 年开源方案】
+    ROS2 节点流水线：识别 → BA位姿解算 → 多模型跟踪 → 火控决策 → 串口通信
+
+    1. recognition_package（视觉识别节点）
+       - 传统灯条检测流水线：findLightbar → matchLightbarCouple → getArmor → judgeArmorSize
+       - judgeColor（颜色判别）、NumClassifier（数字分类器）
+       - SolvePose：初步 PnP 位姿解算
+       核心痛点：强光/弱光/高速下灯条检测鲁棒性，数字分类误识别。
+
+    2. ba_solver（位姿优化节点）
+       - pnp_solver：精确 PnP 求解
+       - graph_optimizer：基于图优化（Bundle Adjustment）的多帧位姿联合优化，提升位姿精度
+       核心痛点：实时性与精度权衡，多帧 BA 在高速目标下的延迟问题。
+
+    3. tracker（多运动模型跟踪节点，对应不同战场场景）
+       - CV_Model：匀速运动模型（Constant Velocity）
+       - NormalSpinning_Model：普通旋转装甲板 EKF 跟踪
+       - NormalSpinning_Model_pekf：粒子滤波 EKF 变体（pekf），应对强机动目标
+       - OutpostSpin_Model：前哨站固定旋转模型
+       核心痛点：运动模型切换时机判断，高速大陀螺下预测精度，模型自适应选择。
+
+    4. fire_control_package（火控与弹道节点）
+       - bullet_solve：弹道解算（考虑重力/空气阻力）
+       - plan.cpp：云台瞄准规划
+       - getLockIdForInfantry / Hero / Sentry：针对不同机器人类型的目标优先级与锁定逻辑
+       核心痛点：不同机器人类型的最优目标选择策略，开火时机的精准判断。
+
+    5. 其他模块：rune（能量机关识别）、transform（坐标变换 TF2）、simulation、visualization、
+       bag_recorder、ros_camera、camera_bridge、information_package（通信协议/PackedHandle）
+
+    部署约束：ROS2 Humble，小电脑（NUC/Orin/Nano）+ 嵌入式单片机，实时性要求严格。
+
+    【场景二：哨兵导航与自主决策，仓库 pb2025_sentry_ws，参考深圳北理莫斯科大学北极熊战队 2025 开源方案】
+    ROS2 Humble 工作空间，含：串口通信、视觉感知、导航（small_gicp 点云 ICP 配准、Ignition Gazebo 仿真）、
+    决策状态机、行为规划。
+    核心痛点：复杂赛场动态障碍物下的局部规划，哨兵自主决策状态机的鲁棒性，与自瞄的协同触发。
+
+    【场景三：雷达站联合决策，参考东北大学 NEU 2024 年开源技术报告架构】
+    雷达站承担全场态势感知：2D 雷达图目标定位、敌我识别、位置广播给哨兵/步兵；
+    联合决策：多机器人血量/位置信息融合 → 威胁评估 → 触发哨兵追击/撤退等战略行为。
+    核心痛点：雷达 2D 投影定位精度、多目标跟踪误匹配、跨机器人决策延迟。
+
+    请针对以上真实模块和痛点，具体说明：
+    ① 论文技术可替换或增强哪个具体模块；
+    ② 在 ROS2/嵌入式实时约束下的落地难点；
+    ③ 若可行，给出简要的集成思路（1-2 句）。
+
+
+
 
 github:
   # GitHub Issue 的标签（会自动创建）

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """
 Auto Paper Agent
 每日从 arXiv 抓取感兴趣的论文，使用 DeepSeek 生成中文摘要，
@@ -20,6 +21,15 @@ from pathlib import Path
 
 import yaml
 from openai import OpenAI  # DeepSeek 兼容 OpenAI SDK
+
+# 本地运行时自动加载 .env 文件（GitHub Actions 环境无需，缺失也不影响）
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 
 # ── 日志配置 ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -409,11 +419,32 @@ def summarize_paper(
     model: str,
     max_tokens: int,
     language: str,
+    application_context: str = "",
 ) -> str:
-    """使用 DeepSeek 生成论文的简要概述"""
+    """使用 DeepSeek 生成论文的简要概述，可选附带 RoboMaster 应用关联分析。"""
     lang_instruction = "用中文" if language == "zh" else "in English"
 
-    prompt = f"""请{lang_instruction}对以下学术论文进行简要概述，包括：
+    app_section = ""
+    if application_context:
+        app_section = f"""
+
+---
+
+**第二部分：应用关联分析**
+
+背景：
+{application_context.strip()}
+
+请分析：
+5. **与自瞄的关联**：该论文的技术能否迁移到装甲板检测、目标位姿估计或运动预测？有哪些可改进点？
+6. **与雷达站/哨兵决策的关联**：该论文的技术能否改善全场态势感知、威胁评估或自主决策调度？有哪些可改进点？
+7. **落地难点**：在 RoboMaster 嵌入式/实时约束下，该技术落地的主要挑战是什么？
+
+如果该论文与上述场景关联性很低，请直接说明"与 RoboMaster 关联性较低"并简要说明原因。"""
+
+    prompt = f"""请{lang_instruction}对以下学术论文进行分析。
+
+**第一部分：论文概述**（控制在 250 字以内）
 1. **核心问题**：这篇论文要解决什么问题？
 2. **主要方法**：提出了什么方法或技术？
 3. **关键结论**：主要发现或贡献是什么？
@@ -421,8 +452,7 @@ def summarize_paper(
 
 论文标题：{paper['title']}
 论文摘要：{paper['abstract']}
-
-请控制在 300 字以内，语言简洁易懂。"""
+{app_section}"""
 
     try:
         response = client.chat.completions.create(
@@ -436,6 +466,7 @@ def summarize_paper(
         log.warning(f"DeepSeek 概述失败 ({paper['id']}): {e}")
         # 降级：直接使用原始摘要
         return f"**摘要（原文）：** {paper['abstract'][:500]}..."
+
 
 
 # ── GitHub Issues 发布 ────────────────────────────────────────────────────────
@@ -618,6 +649,11 @@ def main():
     # ── Step 2: 使用 DeepSeek 生成概述 ──
     summaries: dict[str, str] = {}
 
+    # 是否启用 RoboMaster 应用关联分析
+    app_ctx = ""
+    if ds_cfg.get("enable_application_analysis", False):
+        app_ctx = ds_cfg.get("application_context", "")
+
     if deepseek_api_key:
         log.info("开始使用 DeepSeek 生成论文概述...")
         client = OpenAI(api_key=deepseek_api_key, base_url=DEEPSEEK_BASE_URL)
@@ -630,8 +666,10 @@ def main():
                 model=ds_cfg.get("model", "deepseek-chat"),
                 max_tokens=ds_cfg.get("max_summary_tokens", 500),
                 language=ds_cfg.get("summary_language", "zh"),
+                application_context=app_ctx,
             )
             time.sleep(1)  # 避免 API 限流
+
     else:
         log.warning("未设置 DEEPSEEK_API_KEY，将使用原始摘要（截断）")
         for paper in all_papers:
