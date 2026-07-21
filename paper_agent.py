@@ -30,9 +30,12 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
-# arXiv：GitHub Actions（美国服务器）可直连，作为首选数据源
+# arXiv RSS 订阅源：由 CDN 分发，不受 API 限流影响，天然是"当天新论文"
+ARXIV_RSS = "https://rss.arxiv.org/rss"
+# arXiv Atom API：作为 RSS 的补充/备用
 ARXIV_API = "https://export.arxiv.org/api/query"
 ARXIV_NS = "http://www.w3.org/2005/Atom"
+
 # Semantic Scholar：国内可直连，作为 arXiv 失败时的备用数据源
 S2_SEARCH_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_FIELDS = "title,abstract,authors,year,publicationDate,externalIds,openAccessPdf,fieldsOfStudy,isOpenAccess"
@@ -54,8 +57,129 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-# ── 论文抓取（arXiv，首选数据源） ─────────────────────────────────────────────
+# ── 论文抓取（arXiv RSS，主力数据源，无限流）────────────────────────────────
+def fetch_rss_papers(
+    categories: list[str],
+    keywords: list[str],
+    max_results_per_query: int,
+) -> Optional[list[dict]]:
+    """
+    通过 arXiv RSS 订阅源获取当天新论文，本地按关键词过滤。
+    RSS 由 CDN 缓存分发，不受 API 限流，GitHub Actions 必定可访问。
+    返回 None 表示所有 category RSS 均请求失败。
+    """
+    # 合并所有分类为一条 RSS 请求（arXiv 支持 cat1+cat2 语法）
+    cats_str = "+".join(categories) if categories else "cs.AI+cs.LG+cs.CV+cs.CL"
+    rss_url = f"{ARXIV_RSS}/{cats_str}"
+    log.info(f"[RSS] 获取 arXiv RSS: {rss_url}")
+
+    resp = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(rss_url, headers=HTTP_HEADERS, timeout=30)
+            if resp.status_code == 200:
+                break
+            wait = min(20, 5 * attempt)
+            log.warning(f"[RSS] HTTP {resp.status_code}，{wait}s 后重试 ({attempt}/{MAX_RETRIES})...")
+            time.sleep(wait)
+        except requests.RequestException as e:
+            wait = min(20, 5 * attempt)
+            log.warning(f"[RSS] 请求异常: {e}，{wait}s 后重试 ({attempt}/{MAX_RETRIES})...")
+            time.sleep(wait)
+    else:
+        log.warning("[RSS] arXiv RSS 请求失败，将尝试备用数据源。")
+        return None
+
+    if resp is None or resp.status_code != 200:
+        return None
+
+    # 解析 RSS XML（arXiv RSS 2.0 + Dublin Core namespace）
+    # 注册命名空间避免 ET 输出 ns0: 前缀
+    DC_NS = "http://purl.org/dc/elements/1.1/"
+    ARXIV_TERMS_NS = "http://arxiv.org/schemas/atom"
+
+    try:
+        root = ET.fromstring(resp.text)
+    except ET.ParseError as e:
+        log.warning(f"[RSS] XML 解析失败: {e}")
+        return None
+
+    channel = root.find("channel")
+    if channel is None:
+        log.warning("[RSS] RSS 格式异常，未找到 channel 节点。")
+        return None
+
+    items = channel.findall("item")
+    log.info(f"[RSS] 获取到 {len(items)} 篇今日论文，开始关键词过滤...")
+
+    # 关键词匹配（不区分大小写，title 或 description/abstract 中命中即可）
+    keywords_lower = [kw.lower() for kw in keywords]
+
+    # 按关键词分组收集，保持与旧数据结构兼容
+    query_papers: dict[str, list[dict]] = {kw: [] for kw in keywords}
+
+    for item in items:
+        title = (item.findtext("title") or "").strip()
+        # arXiv RSS title 格式: "Paper Title (arXiv:2407.xxxxx [cs.AI])"
+        # 去掉末尾的 arXiv ID 标注
+        import re as _re
+        title_clean = _re.sub(r"\s*\(arXiv:\S+\)\s*$", "", title).strip()
+
+        abstract = (item.findtext("description") or "").strip()
+        # description 可能包含 HTML，简单去标签
+        abstract_clean = _re.sub(r"<[^>]+>", "", abstract).strip().replace("\n", " ")
+
+        link = (item.findtext("link") or "").strip()
+        paper_id = link.split("/abs/")[-1] if "/abs/" in link else ""
+        if not paper_id:
+            continue
+
+        # 作者（Dublin Core）
+        creator = item.findtext(f"{{{DC_NS}}}creator") or ""
+        authors = [a.strip() for a in creator.split(",")][:5]
+
+        # 分类 tags
+        tags = [c.text for c in item.findall("category") if c.text]
+
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+
+        paper = {
+            "id": paper_id,
+            "title": title_clean,
+            "abstract": abstract_clean,
+            "authors": authors,
+            "published": today_str,
+            "url": f"https://arxiv.org/abs/{paper_id}",
+            "pdf_url": f"https://arxiv.org/pdf/{paper_id}",
+            "tags": tags,
+            "query": "",  # 后面按关键词匹配后填写
+        }
+
+        text_to_search = (title_clean + " " + abstract_clean).lower()
+
+        # 将论文归入匹配的关键词分组
+        matched = False
+        for kw in keywords:
+            if kw.lower() in text_to_search:
+                if len(query_papers[kw]) < max_results_per_query:
+                    p = dict(paper)
+                    p["query"] = kw
+                    query_papers[kw].append(p)
+                    matched = True
+                    break  # 每篇论文只归入第一个匹配的关键词
+
+    all_matched = []
+    for kw in keywords:
+        cnt = len(query_papers[kw])
+        log.info(f"[RSS] 关键词 '{kw}' 匹配到 {cnt} 篇")
+        all_matched.extend(query_papers[kw])
+
+    return all_matched
+
+
+# ── 论文抓取（arXiv Atom API，备用数据源 1）─────────────────────────────────
 def build_arxiv_query(query: str, categories: list[str]) -> str:
+
     q = f'all:"{query}"'
     if categories:
         cat_filter = " OR ".join(f"cat:{c}" for c in categories)
@@ -448,31 +572,39 @@ def main():
 
     log.info(f"运行模式: {run_mode}")
 
-    # ── Step 1: 抓取论文（优先 arXiv，失败时回退 Semantic Scholar）──
+    # ── Step 1: 抓取论文（三级数据源，依次降级）──
+    # 优先级: arXiv RSS（无限流）> arXiv Atom API > Semantic Scholar
     categories = arxiv_cfg.get("categories", [])
     max_results = arxiv_cfg.get("max_results_per_query", 5)
     days_back = arxiv_cfg.get("days_back", 1)
+    keywords = arxiv_cfg["queries"]
 
-    log.info("开始抓取论文（首选 arXiv）...")
-    all_papers = []
-    arxiv_failed = False
-    for query in arxiv_cfg["queries"]:
-        result = fetch_arxiv_papers(query, categories, max_results, days_back)
-        if result is None:
-            # arXiv 请求失败（如国内 IP 429），记录后走备用源
-            arxiv_failed = True
-            break
-        all_papers.extend(result)
-        time.sleep(3)  # 礼貌性延迟
+    log.info("开始抓取论文（数据源优先级：arXiv RSS > arXiv API > Semantic Scholar）...")
 
-    # arXiv 不可用时，改用 Semantic Scholar
-    if arxiv_failed:
-        log.warning("arXiv 不可用，切换到备用数据源 Semantic Scholar...")
+    # 1️⃣ 首选：arXiv RSS（CDN 分发，无限流，GitHub Actions / 国内均可）
+    all_papers = fetch_rss_papers(categories, keywords, max_results)
+
+    if all_papers is None:
+        # 2️⃣ 备用 1：arXiv Atom API（GitHub Actions 美国服务器可用）
+        log.warning("RSS 不可用，尝试 arXiv Atom API...")
         all_papers = []
-        for query in arxiv_cfg["queries"]:
+        for query in keywords:
+            result = fetch_arxiv_papers(query, categories, max_results, days_back)
+            if result is None:
+                all_papers = None  # 标记完全失败
+                break
+            all_papers.extend(result)
+            time.sleep(2)
+
+    if all_papers is None:
+        # 3️⃣ 备用 2：Semantic Scholar（国内 IP 可用）
+        log.warning("arXiv API 也不可用，切换到 Semantic Scholar...")
+        all_papers = []
+        for query in keywords:
             papers = fetch_papers(query, categories, max_results, days_back)
             all_papers.extend(papers)
             time.sleep(3)
+
 
 
 
