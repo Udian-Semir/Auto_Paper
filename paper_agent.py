@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+
 """
 Auto Paper Agent
 每日从 arXiv 抓取感兴趣的论文，使用 DeepSeek 生成中文摘要，
@@ -50,6 +51,10 @@ ARXIV_NS = "http://www.w3.org/2005/Atom"
 S2_SEARCH_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_FIELDS = "title,abstract,authors,year,publicationDate,externalIds,openAccessPdf,fieldsOfStudy,isOpenAccess"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+# Papers with Code：通过 arXiv ID 反查论文的开源代码仓库
+PWC_PAPER_API = "https://paperswithcode.com/api/v1/papers/"
+
 
 
 HTTP_HEADERS = {
@@ -412,6 +417,74 @@ def deduplicate_papers(papers: list[dict]) -> list[dict]:
     return unique
 
 
+# ── 开源代码仓库检索 ──────────────────────────────────────────────────────────
+def _extract_repos_from_abstract(abstract: str) -> list[str]:
+    """从摘要正文里正则提取 GitHub / GitLab 仓库链接（作者常在摘要放出仓库）。"""
+    import re as _re
+
+    if not abstract:
+        return []
+    # 匹配 github.com/owner/repo 或 gitlab.com/owner/repo
+    pattern = _re.compile(
+        r"https?://(?:www\.)?(?:github\.com|gitlab\.com)/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+        _re.IGNORECASE,
+    )
+    repos = []
+    for m in pattern.findall(abstract):
+        # 清理结尾的标点
+        url = m.rstrip(".,;:)")
+        # 去掉常见非仓库路径（如 github.com/blog）
+        if url not in repos:
+            repos.append(url)
+    return repos
+
+
+def fetch_code_repos(paper: dict) -> list[str]:
+    """
+    获取论文的开源代码仓库链接。
+    优先用 Papers with Code（按 arXiv ID 反查官方实现），
+    失败或无结果则用摘要正则兜底。
+    返回去重后的仓库 URL 列表（最多 3 个）。
+    """
+    repos: list[str] = []
+
+    # 只有 arXiv 论文才能用 PwC 按 arXiv ID 查询
+    paper_id = paper.get("id", "")
+    is_arxiv = bool(paper_id) and paper.get("url", "").startswith("https://arxiv.org")
+
+    if is_arxiv:
+        # arXiv ID 去掉版本号后缀（如 2407.01234v2 -> 2407.01234）
+        import re as _re
+        arxiv_id = _re.sub(r"v\d+$", "", paper_id)
+        url = f"{PWC_PAPER_API}arxiv/{arxiv_id}/repositories/"
+        try:
+            resp = requests.get(url, headers=HTTP_HEADERS, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results", []) if isinstance(data, dict) else []
+                # 官方实现优先，其次按 star 数排序
+                results.sort(
+                    key=lambda r: (not r.get("is_official", False), -(r.get("stars") or 0))
+                )
+                for r in results:
+                    repo_url = r.get("url", "")
+                    if repo_url and repo_url not in repos:
+                        repos.append(repo_url)
+                    if len(repos) >= 3:
+                        break
+            elif resp.status_code != 404:
+                log.info(f"[PwC] {arxiv_id} 返回 HTTP {resp.status_code}")
+        except requests.RequestException as e:
+            log.info(f"[PwC] {arxiv_id} 查询异常: {e}")
+
+    # 兜底：从摘要里提取仓库链接
+    if not repos:
+        repos = _extract_repos_from_abstract(paper.get("abstract", ""))[:3]
+
+    return repos
+
+
+
 # ── DeepSeek 概述 ──────────────────────────────────────────────────────────────
 def summarize_paper(
     client: OpenAI,
@@ -461,8 +534,21 @@ def summarize_paper(
             max_tokens=max_tokens,
             temperature=0.3,
         )
-        return response.choices[0].message.content.strip()
+        choice = response.choices[0]
+        content = choice.message.content.strip()
+        # 若因 token 上限被截断，明确提示用户调大 max_summary_tokens
+        if getattr(choice, "finish_reason", None) == "length":
+            log.warning(
+                f"概述被 token 上限截断 ({paper['id']})，"
+                f"建议在 config.yaml 调大 max_summary_tokens（当前 {max_tokens}）。"
+            )
+            content += (
+                "\n\n> ⚠️ *（本段因达到 token 上限被截断，"
+                "可在 config.yaml 调大 `max_summary_tokens` 获取完整分析）*"
+            )
+        return content
     except Exception as e:
+
         log.warning(f"DeepSeek 概述失败 ({paper['id']}): {e}")
         # 降级：直接使用原始摘要
         return f"**摘要（原文）：** {paper['abstract'][:500]}..."
@@ -523,6 +609,15 @@ def build_issue_body(papers: list[dict], summaries: dict[str, str]) -> str:
                 f"- **发布时间**：{paper['published']}",
                 f"- **分类**：{tags_str}",
                 f"- **链接**：[arXiv]({paper['url']}) | [PDF]({paper['pdf_url']})",
+            ]
+
+            # 开源代码仓库（若检索到），方便一键 star
+            repos = paper.get("code_repos", [])
+            if repos:
+                repo_links = " | ".join(f"[{r.rstrip('/').split('/')[-1]}]({r})" for r in repos)
+                lines.append(f"- **💻 开源代码**：{repo_links}")
+
+            lines += [
                 "",
                 "**📝 AI 概述：**",
                 "",
@@ -539,6 +634,7 @@ def build_issue_body(papers: list[dict], summaries: dict[str, str]) -> str:
     ]
 
     return "\n".join(lines)
+
 
 
 def create_github_issue(
@@ -645,6 +741,16 @@ def main():
     if not all_papers:
         log.warning("今日没有找到符合条件的论文，退出。")
         sys.exit(0)
+
+    # ── Step 1.5: 检索每篇论文的开源代码仓库（方便一键 star）──
+    log.info("开始检索论文开源代码仓库（Papers with Code）...")
+    for i, paper in enumerate(all_papers):
+        repos = fetch_code_repos(paper)
+        paper["code_repos"] = repos
+        if repos:
+            log.info(f"  [{i+1}/{len(all_papers)}] 找到 {len(repos)} 个仓库: {paper['title'][:40]}")
+        time.sleep(0.5)  # 轻微限速，友好访问 PwC
+
 
     # ── Step 2: 使用 DeepSeek 生成概述 ──
     summaries: dict[str, str] = {}

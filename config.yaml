@@ -37,8 +37,12 @@ arxiv:
 deepseek:
   # DeepSeek 模型选择
   model: "deepseek-chat"
-  # 概述的最大 token 数（含应用关联分析，适当放大）
-  max_summary_tokens: 900
+  # 概述的最大 token 数（含应用关联分析）。
+  # 提示词包含"论文概述 + 三段应用关联分析（自瞄/雷达站哨兵/落地难点）"，
+  # 中文输出消耗 token 较快，900 会导致雷达站部分被截断，这里放大到 2200。
+  # DeepSeek 单次最大输出为 8192，可按需继续调大。
+  max_summary_tokens: 2200
+
   # 概述语言：zh（中文）或 en（英文）
   summary_language: "zh"
 
