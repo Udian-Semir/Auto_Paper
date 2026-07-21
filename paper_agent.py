@@ -12,7 +12,9 @@ import time
 import logging
 import datetime
 import requests
+import xml.etree.ElementTree as ET
 from typing import Optional
+
 
 from pathlib import Path
 
@@ -28,10 +30,14 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
-# 改用 Semantic Scholar API：国内可直连，完整收录 arXiv 论文，免费无需 Key
+# arXiv：GitHub Actions（美国服务器）可直连，作为首选数据源
+ARXIV_API = "https://export.arxiv.org/api/query"
+ARXIV_NS = "http://www.w3.org/2005/Atom"
+# Semantic Scholar：国内可直连，作为 arXiv 失败时的备用数据源
 S2_SEARCH_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_FIELDS = "title,abstract,authors,year,publicationDate,externalIds,openAccessPdf,fieldsOfStudy,isOpenAccess"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
 
 HTTP_HEADERS = {
     "User-Agent": "Auto-Paper-Agent/1.0 (https://github.com/Udian-Semir/Auto_Paper; research digest bot)"
@@ -48,8 +54,103 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-# ── 论文抓取（Semantic Scholar） ──────────────────────────────────────────────
+# ── 论文抓取（arXiv，首选数据源） ─────────────────────────────────────────────
+def build_arxiv_query(query: str, categories: list[str]) -> str:
+    q = f'all:"{query}"'
+    if categories:
+        cat_filter = " OR ".join(f"cat:{c}" for c in categories)
+        q = f"({q}) AND ({cat_filter})"
+    return q
+
+
+def fetch_arxiv_papers(
+    query: str,
+    categories: list[str],
+    max_results: int,
+    days_back: int,
+) -> Optional[list[dict]]:
+    """从 arXiv API 获取最近论文。返回 None 表示请求失败（触发备用源）。"""
+    params = {
+        "search_query": build_arxiv_query(query, categories),
+        "start": 0,
+        "max_results": max_results * 3,
+        "sortBy": "submittedDate",
+        "sortOrder": "descending",
+    }
+
+    resp = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(
+                ARXIV_API, params=params, headers=HTTP_HEADERS, timeout=30
+            )
+            if resp.status_code == 429:
+                wait = min(30, 3 * attempt)
+                log.warning(f"arXiv 429 限流，{wait}s 后重试 ({attempt}/{MAX_RETRIES})...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            break
+        except requests.RequestException as e:
+            wait = min(30, 3 * attempt)
+            log.warning(f"arXiv 请求异常: {e}，{wait}s 后重试 ({attempt}/{MAX_RETRIES})...")
+            time.sleep(wait)
+    else:
+        log.warning(f"关键词 '{query}' 从 arXiv 获取失败。")
+        return None
+
+    if resp is None or resp.status_code != 200:
+        return None
+
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        days=days_back
+    )
+    papers = []
+    root = ET.fromstring(resp.text)
+    for entry in root.findall(f"{{{ARXIV_NS}}}entry"):
+        published_text = entry.findtext(f"{{{ARXIV_NS}}}published", "")
+        try:
+            published = datetime.datetime.fromisoformat(
+                published_text.replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if published < cutoff:
+            continue
+
+        id_raw = entry.findtext(f"{{{ARXIV_NS}}}id", "")
+        paper_id = id_raw.split("/abs/")[-1] if "/abs/" in id_raw else id_raw
+        title = entry.findtext(f"{{{ARXIV_NS}}}title", "").strip().replace("\n", " ")
+        abstract = entry.findtext(f"{{{ARXIV_NS}}}summary", "").strip().replace("\n", " ")
+        authors = [
+            a.findtext(f"{{{ARXIV_NS}}}name", "")
+            for a in entry.findall(f"{{{ARXIV_NS}}}author")
+        ][:5]
+        tags = [t.get("term", "") for t in entry.findall(f"{{{ARXIV_NS}}}category")]
+
+        papers.append(
+            {
+                "id": paper_id,
+                "title": title,
+                "abstract": abstract,
+                "authors": authors,
+                "published": published.strftime("%Y-%m-%d"),
+                "url": f"https://arxiv.org/abs/{paper_id}",
+                "pdf_url": f"https://arxiv.org/pdf/{paper_id}",
+                "tags": tags,
+                "query": query,
+            }
+        )
+        if len(papers) >= max_results:
+            break
+
+    log.info(f"[arXiv] 关键词 '{query}' 获取到 {len(papers)} 篇论文")
+    return papers
+
+
+# ── 论文抓取（Semantic Scholar，备用数据源） ─────────────────────────────────
 def _parse_date(paper: dict) -> Optional[datetime.date]:
+
     """从 S2 返回中解析发布日期"""
     date_str = paper.get("publicationDate")
     if date_str:
@@ -347,18 +448,32 @@ def main():
 
     log.info(f"运行模式: {run_mode}")
 
-    # ── Step 1: 从 Semantic Scholar 抓取论文 ──
-    log.info("开始从 Semantic Scholar 抓取论文...")
+    # ── Step 1: 抓取论文（优先 arXiv，失败时回退 Semantic Scholar）──
+    categories = arxiv_cfg.get("categories", [])
+    max_results = arxiv_cfg.get("max_results_per_query", 5)
+    days_back = arxiv_cfg.get("days_back", 1)
+
+    log.info("开始抓取论文（首选 arXiv）...")
     all_papers = []
+    arxiv_failed = False
     for query in arxiv_cfg["queries"]:
-        papers = fetch_papers(
-            query=query,
-            categories=arxiv_cfg.get("categories", []),
-            max_results=arxiv_cfg.get("max_results_per_query", 5),
-            days_back=arxiv_cfg.get("days_back", 1),
-        )
-        all_papers.extend(papers)
-        time.sleep(3)  # 礼貌性延迟，避免 API 限流
+        result = fetch_arxiv_papers(query, categories, max_results, days_back)
+        if result is None:
+            # arXiv 请求失败（如国内 IP 429），记录后走备用源
+            arxiv_failed = True
+            break
+        all_papers.extend(result)
+        time.sleep(3)  # 礼貌性延迟
+
+    # arXiv 不可用时，改用 Semantic Scholar
+    if arxiv_failed:
+        log.warning("arXiv 不可用，切换到备用数据源 Semantic Scholar...")
+        all_papers = []
+        for query in arxiv_cfg["queries"]:
+            papers = fetch_papers(query, categories, max_results, days_back)
+            all_papers.extend(papers)
+            time.sleep(3)
+
 
 
     all_papers = deduplicate_papers(all_papers)
