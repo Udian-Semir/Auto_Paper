@@ -32,6 +32,14 @@ ARXIV_API = "https://export.arxiv.org/api/query"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 ARXIV_NS = "http://www.w3.org/2005/Atom"
 
+# arXiv 要求请求带上有意义的 User-Agent，否则容易被限流 (429)
+HTTP_HEADERS = {
+    "User-Agent": "Auto-Paper-Agent/1.0 (https://github.com/Udian-Semir/Auto_Paper; research digest bot)"
+}
+# 遇到 429 时的最大重试次数
+MAX_RETRIES = 5
+
+
 
 # ── 配置加载 ──────────────────────────────────────────────────────────────────
 def load_config(path: str = "config.yaml") -> dict:
@@ -65,11 +73,32 @@ def fetch_arxiv_papers(
         "sortOrder": "descending",
     }
 
-    try:
-        resp = requests.get(ARXIV_API, params=params, timeout=30)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        log.error(f"arXiv API 请求失败: {e}")
+    # 带 User-Agent 和指数退避重试，缓解 429 限流
+    resp = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(
+                ARXIV_API, params=params, headers=HTTP_HEADERS, timeout=30
+            )
+            if resp.status_code == 429:
+                wait = min(60, 5 * attempt)  # 5s, 10s, 15s...
+                log.warning(
+                    f"arXiv 返回 429 限流，{wait}s 后重试 ({attempt}/{MAX_RETRIES})..."
+                )
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            break
+        except requests.RequestException as e:
+            wait = min(60, 5 * attempt)
+            log.warning(f"arXiv 请求异常: {e}，{wait}s 后重试 ({attempt}/{MAX_RETRIES})...")
+            time.sleep(wait)
+    else:
+        log.error(f"关键词 '{query}' 多次重试后仍失败，跳过。")
+        return []
+
+    if resp is None or resp.status_code != 200:
+        log.error(f"关键词 '{query}' 请求失败，跳过。")
         return []
 
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
@@ -78,6 +107,7 @@ def fetch_arxiv_papers(
 
     papers = []
     root = ET.fromstring(resp.text)
+
     for entry in root.findall(f"{{{ARXIV_NS}}}entry"):
         # 解析发布时间
         published_text = entry.findtext(f"{{{ARXIV_NS}}}published", "")
