@@ -6,9 +6,12 @@ __pycache__/
 venv/
 .env
 
-# 本地生成的报告和数据（可选择提交）
-# reports/
-# data/
+# 本地生成的报告和每日数据备份（不入库，避免仓库膨胀）
+reports/
+data/*.json
+# 但保留跨天去重记录（需要持久化以避免重复推送）
+!data/seen_ids.json
+
 
 # macOS
 .DS_Store

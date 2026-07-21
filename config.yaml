@@ -89,8 +89,11 @@ arxiv:
   # 每个关键词最多获取的论文数量
   max_results_per_query: 4
 
-  # 论文发布时间范围（天），只看最近 N 天的论文
-  days_back: 1
+  # 论文发布时间范围（天），只看最近 N 天的论文。
+  # 设为 3 可覆盖周末/节假日 arXiv 不更新造成的空档；
+  # 配合 data/seen_ids.json 跨天去重，不会重复推送已发过的论文。
+  days_back: 3
+
 
 deepseek:
   # DeepSeek 模型选择

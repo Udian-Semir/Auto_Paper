@@ -469,7 +469,7 @@ def fetch_papers(
 
 
 def deduplicate_papers(papers: list[dict]) -> list[dict]:
-    """按论文 ID 去重"""
+    """按论文 ID 去重（单次运行内）"""
     seen = set()
     unique = []
     for p in papers:
@@ -477,6 +477,74 @@ def deduplicate_papers(papers: list[dict]) -> list[dict]:
             seen.add(p["id"])
             unique.append(p)
     return unique
+
+
+# ── 跨天去重（持久化已推送论文 ID）──────────────────────────────────────────
+SEEN_IDS_PATH = Path("data") / "seen_ids.json"
+
+
+def _normalize_id(paper_id: str) -> str:
+    """
+    归一化论文 ID，用于跨天/跨数据源去重。做两件事：
+    1) 剥离 URL 前缀与常见 scheme，只保留核心标识
+       （http://arxiv.org/abs/2407.01234v2 -> 2407.01234v2，arXiv:2407.01234 -> 2407.01234）
+    2) 去掉 arXiv 版本号后缀（2407.01234v2 -> 2407.01234），避免同论文改版重复推送。
+    这样即使 RSS / API / Semantic Scholar 给出不同格式的同一篇论文，也能正确判重。
+    """
+    pid = (paper_id or "").strip()
+    # 取 URL 最后一段路径（去掉 http(s)://arxiv.org/abs/ 等前缀）
+    pid = pid.rstrip("/").split("/")[-1]
+    # 去掉 arXiv: / arxiv: 前缀
+    pid = re.sub(r"(?i)^arxiv:", "", pid)
+    # 去掉版本号后缀
+    pid = re.sub(r"v\d+$", "", pid)
+    return pid.lower()
+
+
+
+def load_seen_ids() -> set[str]:
+    """读取历史已推送的论文 ID 集合（持久化在 data/seen_ids.json）。"""
+    if not SEEN_IDS_PATH.exists():
+        return set()
+    try:
+        data = json.loads(SEEN_IDS_PATH.read_text(encoding="utf-8"))
+        return set(data.get("seen_ids", []))
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning(f"读取 seen_ids.json 失败（将视为空）：{e}")
+        return set()
+
+
+def save_seen_ids(seen_ids: set[str], keep_last: int = 5000):
+    """
+    保存已推送论文 ID。为避免文件无限膨胀，只保留最近 keep_last 条。
+    集合无序，这里简单截断（论文 ID 本身按时间递增，排序后取末尾即最新）。
+    """
+    SEEN_IDS_PATH.parent.mkdir(exist_ok=True)
+    ids_sorted = sorted(seen_ids)
+    if len(ids_sorted) > keep_last:
+        ids_sorted = ids_sorted[-keep_last:]
+    payload = {
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "count": len(ids_sorted),
+        "seen_ids": ids_sorted,
+    }
+    SEEN_IDS_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    log.info(f"已更新去重记录：{SEEN_IDS_PATH}（共 {len(ids_sorted)} 条）")
+
+
+def filter_unseen(papers: list[dict], seen_ids: set[str]) -> list[dict]:
+    """剔除历史已推送过的论文（按归一化 ID 比对）。"""
+    fresh = []
+    for p in papers:
+        if _normalize_id(p["id"]) not in seen_ids:
+            fresh.append(p)
+    skipped = len(papers) - len(fresh)
+    if skipped:
+        log.info(f"跨天去重：跳过 {skipped} 篇此前已推送的论文")
+    return fresh
+
 
 
 # ── 开源代码仓库检索 ──────────────────────────────────────────────────────────
@@ -771,10 +839,21 @@ def main():
     topics = normalize_topics(arxiv_cfg)
     log.info(f"共加载 {len(topics)} 个主题：{[name for name, _ in topics]}")
 
+    # ── 跨天去重：加载历史已推送论文 ID ──
+    seen_ids = load_seen_ids()
+    log.info(f"已加载历史去重记录：{len(seen_ids)} 篇论文")
+
+    log.info(f"抓取时间窗口：最近 {days_back} 天")
     log.info("开始抓取论文（数据源优先级：arXiv RSS > arXiv API > Semantic Scholar）...")
 
-    # 1️⃣ 首选：arXiv RSS（CDN 分发，无限流，GitHub Actions / 国内均可）
-    all_papers = fetch_rss_papers(categories, topics, max_results)
+    # 1️⃣ 首选：arXiv RSS（CDN 分发，无限流，但只提供当天论文）
+    # 当 days_back > 1 时跳过 RSS，直接用 Atom API（支持日期窗口）
+    all_papers = None
+    if days_back == 1:
+        all_papers = fetch_rss_papers(categories, topics, max_results)
+    else:
+        log.info(f"days_back={days_back} > 1，跳过 RSS，使用 Atom API 抓取多日论文...")
+
 
     if all_papers is None:
         # 2️⃣ 备用 1：arXiv Atom API（GitHub Actions 美国服务器可用）
@@ -812,9 +891,14 @@ def main():
     all_papers = deduplicate_papers(all_papers)
     log.info(f"共获取 {len(all_papers)} 篇唯一论文")
 
+    # ── 跨天去重：剔除历史已推送过的论文（多日窗口下避免重复推送）──
+    all_papers = filter_unseen(all_papers, seen_ids)
+    log.info(f"去重后剩余 {len(all_papers)} 篇未推送过的新论文")
+
     if not all_papers:
-        log.warning("今日没有找到符合条件的论文，退出。")
+        log.warning("没有新论文（都已在往期推送过），退出。")
         sys.exit(0)
+
 
     # ── Step 1.5: 检索每篇论文的开源代码仓库（方便一键 star）──
     log.info("开始检索论文开源代码仓库（Papers with Code）...")
@@ -892,6 +976,13 @@ def main():
         )
     log.info(f"数据备份已保存: {json_path}")
 
+    # ── 跨天去重：把本次推送的论文 ID 追加进持久化记录 ──
+    new_ids = {_normalize_id(p["id"]) for p in all_papers}
+    seen_ids.update(new_ids)
+    save_seen_ids(seen_ids)
+    log.info(f"本次新增去重 ID {len(new_ids)} 条，历史累计 {len(seen_ids)} 条")
+
 
 if __name__ == "__main__":
     main()
+
