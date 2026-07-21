@@ -78,13 +78,21 @@ def fetch_papers(
         "sort": "publicationDate:desc",
     }
 
-    # 指数退避重试（S2 免费额度偶尔限流 429）
+    # 可选：Semantic Scholar API Key（免费申请，大幅提升额度，解决匿名 429）
+    # 申请地址: https://www.semanticscholar.org/product/api#api-key
+    headers = dict(HTTP_HEADERS)
+    s2_key = os.environ.get("S2_API_KEY", "")
+    if s2_key:
+        headers["x-api-key"] = s2_key
+
+    # 指数退避重试（匿名调用共享全球限流池，容易 429）
     resp = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.get(
-                S2_SEARCH_API, params=params, headers=HTTP_HEADERS, timeout=30
+                S2_SEARCH_API, params=params, headers=headers, timeout=30
             )
+
             if resp.status_code == 429:
                 wait = min(60, 5 * attempt)
                 log.warning(
