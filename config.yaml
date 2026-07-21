@@ -2,20 +2,78 @@
 # 修改这里的关键词来定制你感兴趣的领域
 
 arxiv:
-  # arXiv 搜索关键词列表（arXiv 检索英文，这里用对应领域的英文关键词）
-  # 覆盖领域：大模型 / 传统决策 / SLAM / 视觉位姿 / 优化算法 / VLA / RL / 世界模型
-  queries:
-    - "large language model decision making"  # 大模型决策
-    - "LLM agent decision"                     # 大模型智能体决策
-    - "decision making"                        # 传统决策
+  # 主题列表（推荐用法）：每个主题一个 name（分组显示名）+ terms（术语/别名/缩写）
 
-    - "SLAM"                           # 同步定位与建图
-    - "visual pose estimation"         # 计算机视觉位姿
-    - "camera pose estimation"         # 相机位姿估计
-    - "optimization algorithm"         # 优化算法
-    - "vision language action"         # VLA
-    - "reinforcement learning"         # RL
-    - "world model"                    # 世界模型
+  # 匹配规则：只要论文标题或摘要命中 terms 里【任意一个】术语即算命中该主题。
+  # 采用「词边界匹配」——例如 SLAM 不会误命中 "Islam"，RL 不会误命中 "world"。
+  # 论文里常只写缩写（RL / VLA / BA / PPO），所以把全称和缩写都列进 terms 很关键。
+  topics:
+    - name: "大模型决策 LLM Decision"
+      terms:
+        - "large language model"
+        - "LLM"
+        - "LLM agent"
+        - "language model decision"
+        - "agentic"
+
+    - name: "决策 Decision Making"
+      terms:
+        - "decision making"
+        - "decision-making"
+        - "sequential decision"
+        - "behavior tree"
+        - "utility decision"
+
+    - name: "SLAM / 定位建图"
+      terms:
+        - "SLAM"
+        - "simultaneous localization and mapping"
+        - "localization and mapping"
+        - "odometry"          # 里程计，SLAM 强相关
+        - "loop closure"
+
+    - name: "视觉位姿 Pose Estimation"
+      terms:
+        - "pose estimation"
+        - "camera pose"
+        - "visual pose"
+        - "PnP"                # Perspective-n-Point
+        - "bundle adjustment"
+        - "6DoF"
+
+    - name: "优化算法 Optimization"
+      terms:
+        - "optimization algorithm"
+        - "convex optimization"
+        - "nonlinear optimization"
+        - "graph optimization"
+        - "factor graph"
+
+    - name: "VLA 视觉语言动作"
+      terms:
+        - "vision language action"
+        - "vision-language-action"
+        - "VLA"
+        - "vision language model"
+        - "VLM"
+
+    - name: "强化学习 RL"
+      terms:
+        - "reinforcement learning"
+        - "RL"
+        - "policy gradient"
+        - "PPO"
+        - "Q-learning"
+        - "actor critic"
+        - "actor-critic"
+
+    - name: "世界模型 World Model"
+      terms:
+        - "world model"
+        - "world models"
+        - "model-based RL"
+        - "latent dynamics"
+
 
   # arXiv 分类过滤（留空则不过滤）
   # 常用分类: cs.AI(人工智能) cs.LG(机器学习) cs.CV(计算机视觉)

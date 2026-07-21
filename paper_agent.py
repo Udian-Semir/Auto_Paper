@@ -72,17 +72,81 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
+# ── 关键词/主题匹配 ────────────────────────────────────────────────────────────
+import re  # 顶层导入，供匹配函数复用
+
+
+def normalize_topics(arxiv_cfg: dict) -> list[tuple[str, list[str]]]:
+    """
+    把配置里的主题统一成 [(主题名, [别名/术语...]), ...] 结构。
+
+    支持两种写法（向后兼容）：
+    1) 新写法 topics:
+         - name: "强化学习 RL"
+           terms: ["reinforcement learning", "RL", "PPO", "policy gradient"]
+    2) 旧写法 queries: ["reinforcement learning", "SLAM", ...]（每个词自成一个主题）
+    """
+    topics = arxiv_cfg.get("topics")
+    result: list[tuple[str, list[str]]] = []
+    if topics:
+        for t in topics:
+            if isinstance(t, str):
+                result.append((t, [t]))
+            elif isinstance(t, dict):
+                name = t.get("name") or (t.get("terms") or [""])[0]
+                terms = t.get("terms") or [name]
+                # 去空、去重（保序）
+                seen, cleaned = set(), []
+                for term in terms:
+                    term = (term or "").strip()
+                    if term and term.lower() not in seen:
+                        seen.add(term.lower())
+                        cleaned.append(term)
+                result.append((name, cleaned or [name]))
+        return result
+    # 回退到旧的 queries 写法
+    return [(q, [q]) for q in arxiv_cfg.get("queries", [])]
+
+
+def _term_matches(text: str, term: str) -> bool:
+    """
+    判断单个术语是否命中文本（词边界匹配，避免 SLAM 命中 Islam 之类误检）。
+    多词术语（如 "reinforcement learning"）要求每个词都以完整单词形式出现，
+    与顺序无关，中间可隔任意内容。
+    内部自行 lower()，调用方无需事先处理大小写。
+    """
+    text_lower = text.lower()
+    words = re.findall(r"[a-z0-9]+", term.lower())
+    if not words:
+        return False
+    for w in words:
+        # (?<![a-z0-9]) ... (?![a-z0-9]) 实现字母数字边界，兼容 "q-learning"→"q"+"learning"
+        if not re.search(rf"(?<![a-z0-9]){re.escape(w)}(?![a-z0-9])", text_lower):
+            return False
+    return True
+
+
+
+def match_topic(text: str, terms: list[str]) -> bool:
+    """主题命中：只要任意一个别名/术语命中即算命中。"""
+    text_lower = text.lower()
+    return any(_term_matches(text_lower, term) for term in terms)
+
+
+
 # ── 论文抓取（arXiv RSS，主力数据源，无限流）────────────────────────────────
 def fetch_rss_papers(
     categories: list[str],
-    keywords: list[str],
+    topics: list[tuple[str, list[str]]],
     max_results_per_query: int,
 ) -> Optional[list[dict]]:
     """
-    通过 arXiv RSS 订阅源获取当天新论文，本地按关键词过滤。
+    通过 arXiv RSS 订阅源获取当天新论文，本地按主题（含别名）过滤。
+    topics: [(主题名, [术语/别名...]), ...]
     RSS 由 CDN 缓存分发，不受 API 限流，GitHub Actions 必定可访问。
     返回 None 表示所有 category RSS 均请求失败。
     """
+
     # 合并所有分类为一条 RSS 请求（arXiv 支持 cat1+cat2 语法）
     cats_str = "+".join(categories) if categories else "cs.AI+cs.LG+cs.CV+cs.CL"
     rss_url = f"{ARXIV_RSS}/{cats_str}"
@@ -125,15 +189,14 @@ def fetch_rss_papers(
         return None
 
     items = channel.findall("item")
-    log.info(f"[RSS] 获取到 {len(items)} 篇今日论文，开始关键词过滤...")
+    log.info(f"[RSS] 获取到 {len(items)} 篇今日论文，开始按主题过滤...")
 
-    # 关键词匹配（不区分大小写，title 或 description/abstract 中命中即可）
-    keywords_lower = [kw.lower() for kw in keywords]
-
-    # 按关键词分组收集，保持与旧数据结构兼容
-    query_papers: dict[str, list[dict]] = {kw: [] for kw in keywords}
+    # 按主题分组收集（主题名 -> 论文列表）
+    topic_names = [name for name, _ in topics]
+    query_papers: dict[str, list[dict]] = {name: [] for name in topic_names}
 
     for item in items:
+
         title = (item.findtext("title") or "").strip()
         # arXiv RSS title 格式: "Paper Title (arXiv:2407.xxxxx [cs.AI])"
         # 去掉末尾的 arXiv ID 标注
@@ -170,24 +233,23 @@ def fetch_rss_papers(
             "query": "",  # 后面按关键词匹配后填写
         }
 
-        text_to_search = (title_clean + " " + abstract_clean).lower()
+        text_to_search = title_clean + " " + abstract_clean
 
-        # 将论文归入匹配的关键词分组
-        matched = False
-        for kw in keywords:
-            if kw.lower() in text_to_search:
-                if len(query_papers[kw]) < max_results_per_query:
+        # 将论文归入第一个命中的主题分组（每篇只归一个，避免重复）
+        for topic_name, terms in topics:
+            if match_topic(text_to_search, terms):
+                if len(query_papers[topic_name]) < max_results_per_query:
                     p = dict(paper)
-                    p["query"] = kw
-                    query_papers[kw].append(p)
-                    matched = True
-                    break  # 每篇论文只归入第一个匹配的关键词
+                    p["query"] = topic_name
+                    query_papers[topic_name].append(p)
+                break  # 命中第一个匹配的主题即停止
 
     all_matched = []
-    for kw in keywords:
-        cnt = len(query_papers[kw])
-        log.info(f"[RSS] 关键词 '{kw}' 匹配到 {cnt} 篇")
-        all_matched.extend(query_papers[kw])
+    for topic_name, _ in topics:
+        cnt = len(query_papers[topic_name])
+        log.info(f"[RSS] 主题 '{topic_name}' 匹配到 {cnt} 篇")
+        all_matched.extend(query_papers[topic_name])
+
 
     return all_matched
 
@@ -704,22 +766,30 @@ def main():
     categories = arxiv_cfg.get("categories", [])
     max_results = arxiv_cfg.get("max_results_per_query", 5)
     days_back = arxiv_cfg.get("days_back", 1)
-    keywords = arxiv_cfg["queries"]
+
+    # 统一解析主题（支持新 topics 格式 + 旧 queries 格式向后兼容）
+    topics = normalize_topics(arxiv_cfg)
+    log.info(f"共加载 {len(topics)} 个主题：{[name for name, _ in topics]}")
 
     log.info("开始抓取论文（数据源优先级：arXiv RSS > arXiv API > Semantic Scholar）...")
 
     # 1️⃣ 首选：arXiv RSS（CDN 分发，无限流，GitHub Actions / 国内均可）
-    all_papers = fetch_rss_papers(categories, keywords, max_results)
+    all_papers = fetch_rss_papers(categories, topics, max_results)
 
     if all_papers is None:
         # 2️⃣ 备用 1：arXiv Atom API（GitHub Actions 美国服务器可用）
+        # 备用模式下用每个主题的第一个术语（最具代表性）作查询词
         log.warning("RSS 不可用，尝试 arXiv Atom API...")
         all_papers = []
-        for query in keywords:
+        for topic_name, terms in topics:
+            query = terms[0]  # 代表性术语
             result = fetch_arxiv_papers(query, categories, max_results, days_back)
             if result is None:
                 all_papers = None  # 标记完全失败
                 break
+            # 把主题名写入 query 字段，保持与 RSS 模式一致
+            for p in result:
+                p["query"] = topic_name
             all_papers.extend(result)
             time.sleep(2)
 
@@ -727,10 +797,14 @@ def main():
         # 3️⃣ 备用 2：Semantic Scholar（国内 IP 可用）
         log.warning("arXiv API 也不可用，切换到 Semantic Scholar...")
         all_papers = []
-        for query in keywords:
+        for topic_name, terms in topics:
+            query = terms[0]
             papers = fetch_papers(query, categories, max_results, days_back)
+            for p in papers:
+                p["query"] = topic_name
             all_papers.extend(papers)
             time.sleep(3)
+
 
 
 
