@@ -62,6 +62,8 @@ HTTP_HEADERS = {
 }
 # 遇到限流时的最大重试次数
 MAX_RETRIES = 5
+# GitHub Issue 正文上限为 65,536 字符，预留空间避免边界和后续格式调整。
+GITHUB_ISSUE_BODY_LIMIT = 60_000
 
 
 
@@ -766,6 +768,40 @@ def build_issue_body(papers: list[dict], summaries: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def split_issue_batches(
+    papers: list[dict],
+    summaries: dict[str, str],
+    max_chars: int = GITHUB_ISSUE_BODY_LIMIT,
+) -> list[tuple[list[dict], str]]:
+    """按 GitHub 正文大小限制，将论文贪心拆成多个 Issue 批次。"""
+    batches: list[tuple[list[dict], str]] = []
+    current: list[dict] = []
+
+    for paper in papers:
+        candidate = current + [paper]
+        candidate_body = build_issue_body(candidate, summaries)
+        if len(candidate_body) <= max_chars:
+            current = candidate
+            continue
+
+        if current:
+            batches.append((current, build_issue_body(current, summaries)))
+            current = [paper]
+        else:
+            current = [paper]
+
+        single_body = build_issue_body(current, summaries)
+        if len(single_body) > max_chars:
+            notice = "\n\n> 本篇 AI 概述过长，已按 GitHub Issue 正文限制截断。"
+            batches.append((current, single_body[: max_chars - len(notice)] + notice))
+            current = []
+
+    if current:
+        batches.append((current, build_issue_body(current, summaries)))
+
+    return batches
+
+
 
 def create_github_issue(
     repo: str,
@@ -781,12 +817,16 @@ def create_github_issue(
     }
     payload = {"title": title, "body": body, "labels": labels}
 
-    resp = requests.post(
-        f"https://api.github.com/repos/{repo}/issues",
-        headers=headers,
-        json=payload,
-        timeout=30,
-    )
+    try:
+        resp = requests.post(
+            f"https://api.github.com/repos/{repo}/issues",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        log.error(f"GitHub Issue 创建请求失败: {e}")
+        return None
 
     if resp.status_code == 201:
         issue_url = resp.json().get("html_url", "")
@@ -943,21 +983,33 @@ def main():
     today = datetime.date.today().strftime("%Y-%m-%d")
     issue_title = f"{gh_cfg.get('issue_title_prefix', '📄 每日论文推送')} [{today}]"
 
-    if run_mode == "github" and github_token and github_repo:
+    if run_mode == "github":
+        if not github_token or not github_repo:
+            log.error("GitHub 模式缺少 GITHUB_TOKEN 或 GITHUB_REPO，无法推送 Issue。")
+            sys.exit(1)
+
         # GitHub Actions 模式：创建 Issue
         ensure_labels(github_repo, github_token, gh_cfg.get("issue_labels", []))
-        body = build_issue_body(all_papers, summaries)
-        issue_url = create_github_issue(
-            repo=github_repo,
-            token=github_token,
-            title=issue_title,
-            body=body,
-            labels=gh_cfg.get("issue_labels", []),
-        )
-        if issue_url:
+        batches = split_issue_batches(all_papers, summaries)
+        log.info(f"将 {len(all_papers)} 篇论文拆分为 {len(batches)} 个 Issue 推送。")
+        for index, (batch_papers, body) in enumerate(batches, 1):
+            title = issue_title
+            if len(batches) > 1:
+                title = f"{issue_title} ({index}/{len(batches)})"
+            issue_url = create_github_issue(
+                repo=github_repo,
+                token=github_token,
+                title=title,
+                body=body,
+                labels=gh_cfg.get("issue_labels", []),
+            )
+            if not issue_url:
+                sys.exit(1)
+
+            # 每批成功后立即落盘；后续批次失败时，已发布论文不会在次日重复推送。
+            seen_ids.update({_normalize_id(p["id"]) for p in batch_papers})
+            save_seen_ids(seen_ids)
             print(f"✅ Issue 创建成功: {issue_url}")
-        else:
-            sys.exit(1)
     else:
         # 本地模式：保存为 Markdown 文件
         report_path = save_local_report(all_papers, summaries)
@@ -985,4 +1037,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
