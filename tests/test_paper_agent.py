@@ -44,6 +44,34 @@ class SplitIssueBatchesTests(unittest.TestCase):
         self.assertIn("已按 GitHub Issue 正文限制截断", batches[0][1])
 
 
+class SelectDailyPapersTests(unittest.TestCase):
+    def test_limits_count_and_prefers_title_matches_across_topics(self):
+        topics = [("RL", ["reinforcement learning"]), ("SLAM", ["SLAM"])]
+        papers = [
+            {
+                **make_paper("rl-abstract", "RL"),
+                "title": "A General Method",
+                "abstract": "A reinforcement learning method.",
+            },
+            {
+                **make_paper("rl-title", "RL"),
+                "title": "Reinforcement Learning for Robots",
+            },
+            {
+                **make_paper("slam-title", "SLAM"),
+                "title": "Fast SLAM",
+            },
+        ]
+
+        selected = paper_agent.select_daily_papers(papers, topics, max_papers=2)
+
+        self.assertEqual({paper["id"] for paper in selected}, {"rl-title", "slam-title"})
+
+    def test_non_positive_limit_keeps_all_papers(self):
+        papers = [make_paper("1"), make_paper("2")]
+        self.assertEqual(paper_agent.select_daily_papers(papers, [], 0), papers)
+
+
 class CreateGithubIssueTests(unittest.TestCase):
     @patch("paper_agent.requests.post", side_effect=requests.Timeout("timed out"))
     def test_request_error_returns_none(self, _post):

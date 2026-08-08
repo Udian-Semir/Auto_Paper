@@ -12,6 +12,7 @@
 - 📡 **三级数据源兜底**：arXiv RSS → arXiv API → Semantic Scholar，确保每天都能抓到论文
 - 🤖 **AI 中文概述**：调用 DeepSeek 对每篇论文生成核心问题 / 方法 / 结论的中文摘要
 - 📌 **GitHub Issue 推送**：每天新建一个 Issue，方便订阅通知和历史查阅
+- 📚 **控制阅读量**：默认每天最多推送 6 篇，优先标题强相关并兼顾主题覆盖
 - 🗂️ **本地运行支持**：也可以在 VSCode 本地运行，生成 Markdown 报告
 
 ---
@@ -32,6 +33,8 @@
 | `world model` | 世界模型 |
 
 覆盖 arXiv 分类：`cs.AI` · `cs.LG` · `cs.CV` · `cs.CL` · `cs.RO` · `math.OC`
+
+> 论文来自 arXiv 预印本，系统不将其标记为“顶会论文”；arXiv 元数据本身不能可靠证明会议录用状态。
 
 ## 🎯 RoboMaster 应用关联分析
 
@@ -128,6 +131,7 @@ arxiv:
     # ...
 
   max_results_per_query: 4        # 每个关键词最多几篇
+  max_papers_per_day: 6           # 每天最终推送总数上限
 
 deepseek:
   summary_language: "zh"                 # zh=中文, en=英文

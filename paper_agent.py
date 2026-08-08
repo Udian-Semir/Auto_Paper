@@ -548,6 +548,49 @@ def filter_unseen(papers: list[dict], seen_ids: set[str]) -> list[dict]:
     return fresh
 
 
+def select_daily_papers(
+    papers: list[dict],
+    topics: list[tuple[str, list[str]]],
+    max_papers: int,
+) -> list[dict]:
+    """按主题相关性和覆盖面选出每天最终推送的论文。"""
+    if max_papers <= 0 or len(papers) <= max_papers:
+        return papers
+
+    terms_by_topic = {name: terms for name, terms in topics}
+    topic_order = [name for name, _ in topics]
+    groups: dict[str, list[dict]] = {name: [] for name in topic_order}
+
+    for paper in papers:
+        groups.setdefault(paper.get("query", "其他"), []).append(paper)
+
+    def relevance_score(paper: dict) -> tuple[int, int]:
+        terms = terms_by_topic.get(paper.get("query", ""), [])
+        title_hits = sum(_term_matches(paper.get("title", ""), term) for term in terms)
+        abstract_hits = sum(
+            _term_matches(paper.get("abstract", ""), term) for term in terms
+        )
+        return title_hits, abstract_hits
+
+    for group in groups.values():
+        group.sort(key=relevance_score, reverse=True)
+
+    selected: list[dict] = []
+    ordered_groups = topic_order + [name for name in groups if name not in topic_order]
+    while len(selected) < max_papers:
+        round_candidates = [groups[name].pop(0) for name in ordered_groups if groups[name]]
+        if not round_candidates:
+            break
+        round_candidates.sort(key=relevance_score, reverse=True)
+        selected.extend(round_candidates[: max_papers - len(selected)])
+
+    log.info(
+        f"每日数量限制：从 {len(papers)} 篇候选中选出 {len(selected)} 篇，"
+        f"覆盖 {len({p.get('query', '') for p in selected})} 个主题"
+    )
+    return selected
+
+
 
 # ── 开源代码仓库检索 ──────────────────────────────────────────────────────────
 def _extract_repos_from_abstract(abstract: str) -> list[str]:
@@ -939,6 +982,11 @@ def main():
         log.warning("没有新论文（都已在往期推送过），退出。")
         sys.exit(0)
 
+    all_papers = select_daily_papers(
+        all_papers,
+        topics,
+        int(arxiv_cfg.get("max_papers_per_day", 6)),
+    )
 
     # ── Step 1.5: 检索每篇论文的开源代码仓库（方便一键 star）──
     log.info("开始检索论文开源代码仓库（Papers with Code）...")
